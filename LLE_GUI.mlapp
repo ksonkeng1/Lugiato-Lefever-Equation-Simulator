@@ -1,0 +1,568 @@
+classdef LLE_GUI < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure                    matlab.ui.Figure
+        Logo                        matlab.ui.control.Image
+        delta_lambdaEditField       matlab.ui.control.NumericEditField
+        delta_lambdaEditFieldLabel  matlab.ui.control.Label
+        n2EditField                 matlab.ui.control.NumericEditField
+        n2EditFieldLabel            matlab.ui.control.Label
+        CalculatenormalizedparamtetersButton  matlab.ui.control.Button
+        n0EditField                 matlab.ui.control.NumericEditField
+        n0EditFieldLabel            matlab.ui.control.Label
+        lambda0EditField            matlab.ui.control.NumericEditField
+        lambda0EditFieldLabel       matlab.ui.control.Label
+        P_wgEditField               matlab.ui.control.NumericEditField
+        P_wgEditFieldLabel          matlab.ui.control.Label
+        D2EditField                 matlab.ui.control.NumericEditField
+        D2EditFieldLabel            matlab.ui.control.Label
+        D1EditField                 matlab.ui.control.NumericEditField
+        D1EditFieldLabel            matlab.ui.control.Label
+        LEditField                  matlab.ui.control.NumericEditField
+        LEditFieldLabel             matlab.ui.control.Label
+        REditField                  matlab.ui.control.NumericEditField
+        REditFieldLabel             matlab.ui.control.Label
+        A_effEditField              matlab.ui.control.NumericEditField
+        A_effEditFieldLabel         matlab.ui.control.Label
+        kappa_extEditField          matlab.ui.control.NumericEditField
+        kappa_extEditFieldLabel     matlab.ui.control.Label
+        Q_loadEditField             matlab.ui.control.NumericEditField
+        Q_loadEditFieldLabel        matlab.ui.control.Label
+        kappa_intEditField          matlab.ui.control.NumericEditField
+        kappa_intEditFieldLabel     matlab.ui.control.Label
+        Beta_phEditField            matlab.ui.control.NumericEditField
+        Beta_phEditFieldLabel       matlab.ui.control.Label
+        FEditField                  matlab.ui.control.NumericEditField
+        FEditFieldLabel             matlab.ui.control.Label
+        betaEditField               matlab.ui.control.NumericEditField
+        betaEditFieldLabel          matlab.ui.control.Label
+        alphaEditField              matlab.ui.control.NumericEditField
+        alphaEditFieldLabel         matlab.ui.control.Label
+        LoadButton                  matlab.ui.control.Button
+        UIAxes2                     matlab.ui.control.UIAxes
+        UIAxes                      matlab.ui.control.UIAxes
+    end
+
+    
+    properties (Access = private)
+        alpha % Description
+        beta % Description
+        F % Description
+        kappa_ext % Description
+
+        kappa_int % Description
+        Beta_ph % Description
+        Q_load % Description
+        A_eff % Description
+        R % Description
+        L % Description
+        D1 % Description
+        D2 % Description
+        P_wg % Description
+        lambda0 % Description
+        n0 % Description
+        n2 % Description
+        delta_lambda % Description
+        
+    end
+    
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Button pushed function: LoadButton
+        function LoadButtonPushed(app, event)
+
+            %alpha = 0;
+            %beta = -0.0125;
+            %F = 1.71;
+            gam = 1;
+
+            alphaEditFieldValueChanged(app, event);
+            betaEditFieldValueChanged(app, event);
+            Beta_phEditFieldValueChanged(app, event);
+            FEditFieldValueChanged(app, event);
+
+
+            %% numerical settings
+            %transverse domain - distance
+            %longitudinal domain - time
+            N = 512*2;                  %transverse discretization
+            L = sqrt(8*pi^2/abs(app.beta)); %normalized mode circumference
+            Theta = L;                  %transverse domain size
+            naxis = (-N/2:N/2-1).';
+            dth = Theta/N;
+            theta = dth*naxis;          %distance domain
+            dw = 2*pi/Theta;
+            k = fftshift(dw*naxis);     %wavenumber domain
+            T = 64*pi;                  %propagation distance in time
+            dt = 0.001;                 %time step size
+            
+            %intial condition 1
+            eta = L/2*pi;
+            A0 = sqrt(abs(app.beta/gam));
+            u0 = A0*sech(eta*theta);
+
+            %intial condition 2
+            % tau = 0.01;
+            % u0 = sqrt(1.2)*exp(-(theta/tau).^2);
+            
+            %solution and time storage arrays
+            usave = u0;
+            tsave = 0;
+            
+            %adaptive step sie parameters
+            err_upper = 1e-7;
+            err_lower = 1e-9;
+            dt_max = 0.001;
+            
+            tic;
+
+            uf = fft(u0);
+            A = -(1+1i*app.alpha);
+            % LOf = (A+1i*beta/2*k.^2); %Linear operator in frequency domain
+            LOf = (A-1i*k.^2); %Linear operator in frequency domain
+            ELOf = exp(LOf*dt/2); %Exponential of linear op in freq domain with split step (for step size h)
+            ELOf2 = exp(LOf*dt/4); %Exponential of linear op in freq domain with split step (for step size h/2)
+            Linv_Ff = fft(app.F*ones(N,1))./LOf; 
+            NL = @(ut,h) exp(1i*gam*abs(ut).^2*h);
+            if ~all(LOf)
+                Linv_Ff = zeros(N,1);
+            end
+
+            t = 0;
+            save_int = T/20;
+            t_nextsave = save_int;
+            while (t < T)
+                uf1 = solve_single_step(uf,ELOf,Linv_Ff,NL,dt); %Full step
+                uf2 = solve_single_step(uf,ELOf2,Linv_Ff,NL,dt/2); %First half step
+                uf2 = solve_single_step(uf2,ELOf2,Linv_Ff,NL,dt/2); %Second half step
+                rel_err = norm(uf2-uf1,inf)/norm(uf2,inf); %Checking relative error. Should be less than err_lower is step size is good enough
+                
+                % adjust the step size
+                if  rel_err > err_upper
+                    dt = dt*2/3;
+                else
+                    uf = (4*uf2-uf1)/3; %Richardson extrapolation
+                    t = t+dt;
+                    if rel_err < err_lower
+                        dt = dt*2;
+                        if dt>dt_max
+                            dt = dt_max;
+                        end
+                    end
+                end
+                
+                if t > t_nextsave
+                    %disp([t;dt;rel_err]);
+                    fprintf("time: %.15f\nstep size: %.15f\nrelative error: %.15f\n\n",t,dt,rel_err);
+                    t_nextsave = t_nextsave + save_int;
+                    ut = ifft(uf);
+                    usave = [usave ut];
+                    tsave = [tsave t];
+                end    
+            end
+            
+            toc
+
+            figure
+            mesh(app.UIAxes,tsave,theta,abs(usave));
+            
+            figure
+            plot(app.UIAxes2,theta,abs(ifft(uf)).^2);
+            
+            save temp.mat;
+        end
+
+        % Value changed function: alphaEditField
+        function alphaEditFieldValueChanged(app, event)
+            app.alpha = app.alphaEditField.Value;
+            
+        end
+
+        % Value changed function: betaEditField
+        function betaEditFieldValueChanged(app, event)
+            app.beta = app.betaEditField.Value;
+            
+        end
+
+        % Value changed function: FEditField
+        function FEditFieldValueChanged(app, event)
+            app.F = app.FEditField.Value;
+            
+        end
+
+        % Value changed function: kappa_intEditField
+        function kappa_intEditFieldValueChanged(app, event)
+            app.kappa_int = app.kappa_intEditField.Value;
+            
+        end
+
+        % Value changed function: Beta_phEditField
+        function Beta_phEditFieldValueChanged(app, event)
+            app.Beta_ph = app.Beta_phEditField.Value;
+            
+        end
+
+        % Value changed function: kappa_extEditField
+        function kappa_extEditFieldValueChanged(app, event)
+            app.kappa_ext = app.kappa_extEditField.Value;
+            
+        end
+
+        % Value changed function: Q_loadEditField
+        function Q_loadEditFieldValueChanged(app, event)
+            app.Q_load = app.Q_loadEditField.Value;
+            
+        end
+
+        % Value changed function: A_effEditField
+        function A_effEditFieldValueChanged(app, event)
+            app.A_eff = app.A_effEditField.Value;
+            
+        end
+
+        % Value changed function: REditField
+        function REditFieldValueChanged(app, event)
+            app.R = app.REditField.Value;
+            
+        end
+
+        % Value changed function: LEditField
+        function LEditFieldValueChanged(app, event)
+            app.L = app.LEditField.Value;
+            
+        end
+
+        % Value changed function: D1EditField
+        function D1EditFieldValueChanged(app, event)
+            app.D1 = app.D1EditField.Value;
+            
+        end
+
+        % Value changed function: D2EditField
+        function D2EditFieldValueChanged(app, event)
+            app.D2 = app.D2EditField.Value;
+            
+        end
+
+        % Value changed function: P_wgEditField
+        function P_wgEditFieldValueChanged(app, event)
+            app.P_wg = app.P_wgEditField.Value;
+            
+        end
+
+        % Value changed function: lambda0EditField
+        function lambda0EditFieldValueChanged(app, event)
+            app.lambda0 = app.lambda0EditField.Value;
+            
+        end
+
+        % Value changed function: n0EditField
+        function n0EditFieldValueChanged(app, event)
+            app.n0 = app.n0EditField.Value;
+            
+        end
+
+        % Value changed function: n2EditField
+        function n2EditFieldValueChanged(app, event)
+            app.n2 = app.n2EditField.Value;
+            
+        end
+
+        % Button pushed function: CalculatenormalizedparamtetersButton
+        function normalize(app, event)
+            kappa = app.kappa_ext + app.kappa_int;
+            Tr = 2*pi/app.D1;
+            c = 2.9979e8;
+            w0 = ((2*pi*c)/app.lambda0 );
+            loss = w0 * Tr / app.Q_load;
+            gamma = app.n2 * w0 * Tr / (app.n0 * app.A_eff);
+            if app.Q_load == 0
+                app.Q_load = (w0 / kappa);
+            end
+
+            app.FEditField.Value = sqrt(8*gamma/loss.^3)*sqrt(app.kappa_ext*app.P_wg);
+
+            if app.D2 == 0
+                Beta2 = (8*pi^3*app.R/Tr^2)*app.Beta_ph;
+                app.betaEditField.Value = 2 * Beta2 / loss;
+            else 
+                Beta2 = Tr * app.D2;
+                app.betaEditField.Value = -2 * app.D2 * app.Q_load / w0;
+            end
+
+            
+            
+            
+            app.alphaEditField.Value = (app.delta_lambda / app.lambda0) * 2 * app.Q_load;
+
+            
+             
+
+        end
+
+        % Value changed function: delta_lambdaEditField
+        function delta_lambdaEditFieldValueChanged(app, event)
+            app.delta_lambda = app.delta_lambdaEditField.Value;
+            
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.Position = [100 100 1000 696];
+            app.UIFigure.Name = 'MATLAB App';
+
+            % Create UIAxes
+            app.UIAxes = uiaxes(app.UIFigure);
+            app.UIAxes.XTick = [];
+            app.UIAxes.Position = [15 310 466 371];
+
+            % Create UIAxes2
+            app.UIAxes2 = uiaxes(app.UIFigure);
+            app.UIAxes2.Position = [480 302 500 365];
+
+            % Create LoadButton
+            app.LoadButton = uibutton(app.UIFigure, 'push');
+            app.LoadButton.ButtonPushedFcn = createCallbackFcn(app, @LoadButtonPushed, true);
+            app.LoadButton.Position = [273 281 100 22];
+            app.LoadButton.Text = 'Load';
+
+            % Create alphaEditFieldLabel
+            app.alphaEditFieldLabel = uilabel(app.UIFigure);
+            app.alphaEditFieldLabel.HorizontalAlignment = 'right';
+            app.alphaEditFieldLabel.Position = [407 250 35 22];
+            app.alphaEditFieldLabel.Text = 'alpha';
+
+            % Create alphaEditField
+            app.alphaEditField = uieditfield(app.UIFigure, 'numeric');
+            app.alphaEditField.ValueChangedFcn = createCallbackFcn(app, @alphaEditFieldValueChanged, true);
+            app.alphaEditField.Position = [457 250 100 22];
+
+            % Create betaEditFieldLabel
+            app.betaEditFieldLabel = uilabel(app.UIFigure);
+            app.betaEditFieldLabel.HorizontalAlignment = 'right';
+            app.betaEditFieldLabel.Position = [413 148 29 22];
+            app.betaEditFieldLabel.Text = 'beta';
+
+            % Create betaEditField
+            app.betaEditField = uieditfield(app.UIFigure, 'numeric');
+            app.betaEditField.Limits = [-1 1];
+            app.betaEditField.ValueChangedFcn = createCallbackFcn(app, @betaEditFieldValueChanged, true);
+            app.betaEditField.Position = [457 148 100 22];
+
+            % Create FEditFieldLabel
+            app.FEditFieldLabel = uilabel(app.UIFigure);
+            app.FEditFieldLabel.HorizontalAlignment = 'right';
+            app.FEditFieldLabel.Position = [417 61 25 22];
+            app.FEditFieldLabel.Text = 'F';
+
+            % Create FEditField
+            app.FEditField = uieditfield(app.UIFigure, 'numeric');
+            app.FEditField.ValueChangedFcn = createCallbackFcn(app, @FEditFieldValueChanged, true);
+            app.FEditField.Position = [457 61 100 22];
+            app.FEditField.Value = 2;
+
+            % Create Beta_phEditFieldLabel
+            app.Beta_phEditFieldLabel = uilabel(app.UIFigure);
+            app.Beta_phEditFieldLabel.HorizontalAlignment = 'right';
+            app.Beta_phEditFieldLabel.Position = [53 250 50 22];
+            app.Beta_phEditFieldLabel.Text = 'Beta_ph';
+
+            % Create Beta_phEditField
+            app.Beta_phEditField = uieditfield(app.UIFigure, 'numeric');
+            app.Beta_phEditField.ValueChangedFcn = createCallbackFcn(app, @Beta_phEditFieldValueChanged, true);
+            app.Beta_phEditField.Position = [118 250 100 22];
+
+            % Create kappa_intEditFieldLabel
+            app.kappa_intEditFieldLabel = uilabel(app.UIFigure);
+            app.kappa_intEditFieldLabel.HorizontalAlignment = 'right';
+            app.kappa_intEditFieldLabel.Position = [45 229 58 22];
+            app.kappa_intEditFieldLabel.Text = 'kappa_int';
+
+            % Create kappa_intEditField
+            app.kappa_intEditField = uieditfield(app.UIFigure, 'numeric');
+            app.kappa_intEditField.ValueChangedFcn = createCallbackFcn(app, @kappa_intEditFieldValueChanged, true);
+            app.kappa_intEditField.Position = [118 229 100 22];
+
+            % Create Q_loadEditFieldLabel
+            app.Q_loadEditFieldLabel = uilabel(app.UIFigure);
+            app.Q_loadEditFieldLabel.HorizontalAlignment = 'right';
+            app.Q_loadEditFieldLabel.Position = [59 187 44 22];
+            app.Q_loadEditFieldLabel.Text = 'Q_load';
+
+            % Create Q_loadEditField
+            app.Q_loadEditField = uieditfield(app.UIFigure, 'numeric');
+            app.Q_loadEditField.ValueChangedFcn = createCallbackFcn(app, @Q_loadEditFieldValueChanged, true);
+            app.Q_loadEditField.Position = [118 187 100 22];
+
+            % Create kappa_extEditFieldLabel
+            app.kappa_extEditFieldLabel = uilabel(app.UIFigure);
+            app.kappa_extEditFieldLabel.HorizontalAlignment = 'right';
+            app.kappa_extEditFieldLabel.Position = [42 208 61 22];
+            app.kappa_extEditFieldLabel.Text = 'kappa_ext';
+
+            % Create kappa_extEditField
+            app.kappa_extEditField = uieditfield(app.UIFigure, 'numeric');
+            app.kappa_extEditField.ValueChangedFcn = createCallbackFcn(app, @kappa_extEditFieldValueChanged, true);
+            app.kappa_extEditField.Position = [118 208 100 22];
+
+            % Create A_effEditFieldLabel
+            app.A_effEditFieldLabel = uilabel(app.UIFigure);
+            app.A_effEditFieldLabel.HorizontalAlignment = 'right';
+            app.A_effEditFieldLabel.Position = [70 166 33 22];
+            app.A_effEditFieldLabel.Text = 'A_eff';
+
+            % Create A_effEditField
+            app.A_effEditField = uieditfield(app.UIFigure, 'numeric');
+            app.A_effEditField.ValueChangedFcn = createCallbackFcn(app, @A_effEditFieldValueChanged, true);
+            app.A_effEditField.Position = [118 166 100 22];
+
+            % Create REditFieldLabel
+            app.REditFieldLabel = uilabel(app.UIFigure);
+            app.REditFieldLabel.HorizontalAlignment = 'right';
+            app.REditFieldLabel.Position = [78 145 25 22];
+            app.REditFieldLabel.Text = 'R';
+
+            % Create REditField
+            app.REditField = uieditfield(app.UIFigure, 'numeric');
+            app.REditField.ValueChangedFcn = createCallbackFcn(app, @REditFieldValueChanged, true);
+            app.REditField.Position = [118 145 100 22];
+
+            % Create LEditFieldLabel
+            app.LEditFieldLabel = uilabel(app.UIFigure);
+            app.LEditFieldLabel.HorizontalAlignment = 'right';
+            app.LEditFieldLabel.Position = [78 124 25 22];
+            app.LEditFieldLabel.Text = 'L';
+
+            % Create LEditField
+            app.LEditField = uieditfield(app.UIFigure, 'numeric');
+            app.LEditField.ValueChangedFcn = createCallbackFcn(app, @LEditFieldValueChanged, true);
+            app.LEditField.Position = [118 124 100 22];
+
+            % Create D1EditFieldLabel
+            app.D1EditFieldLabel = uilabel(app.UIFigure);
+            app.D1EditFieldLabel.HorizontalAlignment = 'right';
+            app.D1EditFieldLabel.Position = [78 103 25 22];
+            app.D1EditFieldLabel.Text = 'D1';
+
+            % Create D1EditField
+            app.D1EditField = uieditfield(app.UIFigure, 'numeric');
+            app.D1EditField.ValueChangedFcn = createCallbackFcn(app, @D1EditFieldValueChanged, true);
+            app.D1EditField.Position = [118 103 100 22];
+
+            % Create D2EditFieldLabel
+            app.D2EditFieldLabel = uilabel(app.UIFigure);
+            app.D2EditFieldLabel.HorizontalAlignment = 'right';
+            app.D2EditFieldLabel.Position = [78 82 25 22];
+            app.D2EditFieldLabel.Text = 'D2';
+
+            % Create D2EditField
+            app.D2EditField = uieditfield(app.UIFigure, 'numeric');
+            app.D2EditField.ValueChangedFcn = createCallbackFcn(app, @D2EditFieldValueChanged, true);
+            app.D2EditField.Position = [118 82 100 22];
+
+            % Create P_wgEditFieldLabel
+            app.P_wgEditFieldLabel = uilabel(app.UIFigure);
+            app.P_wgEditFieldLabel.HorizontalAlignment = 'right';
+            app.P_wgEditFieldLabel.Position = [68 61 35 22];
+            app.P_wgEditFieldLabel.Text = 'P_wg';
+
+            % Create P_wgEditField
+            app.P_wgEditField = uieditfield(app.UIFigure, 'numeric');
+            app.P_wgEditField.ValueChangedFcn = createCallbackFcn(app, @P_wgEditFieldValueChanged, true);
+            app.P_wgEditField.Position = [118 61 100 22];
+
+            % Create lambda0EditFieldLabel
+            app.lambda0EditFieldLabel = uilabel(app.UIFigure);
+            app.lambda0EditFieldLabel.HorizontalAlignment = 'right';
+            app.lambda0EditFieldLabel.Position = [51 40 52 22];
+            app.lambda0EditFieldLabel.Text = 'lambda0';
+
+            % Create lambda0EditField
+            app.lambda0EditField = uieditfield(app.UIFigure, 'numeric');
+            app.lambda0EditField.ValueChangedFcn = createCallbackFcn(app, @lambda0EditFieldValueChanged, true);
+            app.lambda0EditField.Position = [118 40 100 22];
+
+            % Create n0EditFieldLabel
+            app.n0EditFieldLabel = uilabel(app.UIFigure);
+            app.n0EditFieldLabel.HorizontalAlignment = 'right';
+            app.n0EditFieldLabel.Position = [78 19 25 22];
+            app.n0EditFieldLabel.Text = 'n0';
+
+            % Create n0EditField
+            app.n0EditField = uieditfield(app.UIFigure, 'numeric');
+            app.n0EditField.ValueChangedFcn = createCallbackFcn(app, @n0EditFieldValueChanged, true);
+            app.n0EditField.Position = [118 19 100 22];
+
+            % Create CalculatenormalizedparamtetersButton
+            app.CalculatenormalizedparamtetersButton = uibutton(app.UIFigure, 'push');
+            app.CalculatenormalizedparamtetersButton.ButtonPushedFcn = createCallbackFcn(app, @normalize, true);
+            app.CalculatenormalizedparamtetersButton.Position = [251 187 197 22];
+            app.CalculatenormalizedparamtetersButton.Text = 'Calculate normalized paramteters';
+
+            % Create n2EditFieldLabel
+            app.n2EditFieldLabel = uilabel(app.UIFigure);
+            app.n2EditFieldLabel.HorizontalAlignment = 'right';
+            app.n2EditFieldLabel.Position = [78 -2 25 22];
+            app.n2EditFieldLabel.Text = 'n2';
+
+            % Create n2EditField
+            app.n2EditField = uieditfield(app.UIFigure, 'numeric');
+            app.n2EditField.ValueChangedFcn = createCallbackFcn(app, @n2EditFieldValueChanged, true);
+            app.n2EditField.Position = [118 -2 100 22];
+
+            % Create delta_lambdaEditFieldLabel
+            app.delta_lambdaEditFieldLabel = uilabel(app.UIFigure);
+            app.delta_lambdaEditFieldLabel.HorizontalAlignment = 'right';
+            app.delta_lambdaEditFieldLabel.Position = [25 271 78 22];
+            app.delta_lambdaEditFieldLabel.Text = 'delta_lambda';
+
+            % Create delta_lambdaEditField
+            app.delta_lambdaEditField = uieditfield(app.UIFigure, 'numeric');
+            app.delta_lambdaEditField.ValueChangedFcn = createCallbackFcn(app, @delta_lambdaEditFieldValueChanged, true);
+            app.delta_lambdaEditField.Position = [118 271 100 22];
+
+            % Create Logo
+            app.Logo = uiimage(app.UIFigure);
+            app.Logo.Position = [699 1 100 100];
+            app.Logo.ImageSource = 'umbclogo.png';
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = LLE_GUI
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end
